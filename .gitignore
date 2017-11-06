@@ -1,0 +1,6 @@
+*
+!*.c
+!.gitignore
+!data.bin
+test.c
+
