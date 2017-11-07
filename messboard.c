@@ -11,6 +11,7 @@
 
 struct Message{
 	char data[256];
+	int len;
 };
 
 void error(const char*);
@@ -110,18 +111,16 @@ void dostuff (int sock, char* shrdmem, sem_t* semaphore)
 		}
 		int i;
 		int cmdSize=-1,msgSize=0;
+		
 		for(i=0; buffer[i] != '\n'; i++){
 			if(buffer[i] == ' ' && cmdSize == -1){
 				cmdSize = i; 
 			}
 		}
-		msgSize = i - cmdSize - 1;
-		if(cmdSize == -1 || msgSize == 0){
-			int n = write(sock,"Invalid command!",16);
-			if(n<0){
-				error("Error writing to socket");
-                        }
-			continue;
+		if(cmdSize == -1){
+			cmdSize = i;
+		}else{
+			msgSize = i - cmdSize - 1;
 		}
 		command = (char *)malloc(cmdSize+1);
 		message = (char *)malloc(msgSize+1);
@@ -130,12 +129,25 @@ void dostuff (int sock, char* shrdmem, sem_t* semaphore)
 		*(command+cmdSize) = '\0';
 		*(message+msgSize) = '\0';
 
+		
 		if(strcmp(command,"SEND") == 0){
 			int wrtIndx = 0;
+			struct Message tmpMes;
+
+			if(msgSize == 0){
+				int n = write(sock,"Empty message!",14);
+				if(n<0){
+					error("Error writing to socket");
+				}
+				continue;
+			}
+
 			memcpy(&wrtIndx, shrdmem, sizeof(int));
+			strcpy(tmpMes.data,message);
+			tmpMes.len = msgSize;
 			// Atomic op start
 			sem_wait(semaphore);
-			memcpy(shrdmem + sizeof(int) + sizeof(struct Message) * wrtIndx, message, msgSize);
+			memcpy(shrdmem + sizeof(int) + sizeof(struct Message) * wrtIndx, &tmpMes, sizeof(struct Message));
 			wrtIndx++;
 			memcpy(shrdmem, &wrtIndx, sizeof(int));
 			sem_post(semaphore);
@@ -144,13 +156,37 @@ void dostuff (int sock, char* shrdmem, sem_t* semaphore)
 			if(n<0){
 				error("Error writing to socket");
 			}
-		}else if(strcmp(command,"LIST") == 0){
-			char mes[256];
-			memcpy(mes,shrdmem + sizeof(int),sizeof(mes));
-			int n = write(sock,mes,256);
+		}else if(strcmp(command,"LAST") == 0){
+			int lstNmbr=0, wrtIndx=0,i=0,resultLen=0;
+			char *tailshrdMem,*result;
+		 	struct Message *msgLst;
+
+			sscanf(message, "%d", &lstNmbr);
+			memcpy(&wrtIndx, shrdmem, sizeof(int));
+			if(lstNmbr > wrtIndx || msgSize == 0){
+				lstNmbr = wrtIndx;
+			}
+				
+			tailshrdMem = shrdmem + sizeof(int) + (sizeof(struct Message) * wrtIndx);
+			msgLst = malloc(sizeof(struct Message) * lstNmbr);
+			memcpy(msgLst,tailshrdMem - (sizeof(struct Message) * lstNmbr), sizeof(struct Message) * lstNmbr);
+			for(i=0;i<lstNmbr;i++){
+				resultLen += msgLst[i].len;
+			}
+			char c = '\n';
+			result = (char *)malloc(resultLen + (lstNmbr - 1));
+			for(i=lstNmbr-1;i>=0;i--){
+				if(i!=lstNmbr-1){
+					strncat(result,&c,1);
+				}
+				strncat(result,msgLst[i].data,msgLst[i].len);
+			}
+			int n = write(sock,result,resultLen+(lstNmbr-1));
 			if(n<0){
 				error("Error writing to socket");
-			}	
+			}
+			free(result);	
+			free(msgLst);
 		}else if(strcmp(command,"BYE") == 0){
 			int n = write(sock,"<ok>",4);
 			if(n<0){
@@ -160,6 +196,7 @@ void dostuff (int sock, char* shrdmem, sem_t* semaphore)
 			free(message);
 			break;			
 		}else{
+			printf("%s\n",command);
 			int n = write(sock,"Got invalid command",20);
 			if(n<0){
 				error("Error writing to socket");	

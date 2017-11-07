@@ -72,18 +72,19 @@ void *sendCommand(void *vargp){
 	while(1){
 		bzero(buffer,256);
 		fgets(buffer,255,stdin);
-		int i;
-		int cmdSize=-1,msgSize=0;
+		int i,cmdSize=-1;
 		char *command;
 		for(i=0; buffer[i] != '\n'; i++){
 			if(buffer[i] == ' ' && cmdSize == -1){
 				cmdSize = i; 
 			}
 		}
-		msgSize = i - cmdSize - 1;
-		if(cmdSize == -1||msgSize == 0){
+		if(i==0){
 			printf("Invalid command!\n");
 			continue;
+		}
+		if(cmdSize == -1){
+			cmdSize = i;
 		}
 		command = (char *)malloc(cmdSize+1);
 		strncpy(command,buffer,cmdSize);
