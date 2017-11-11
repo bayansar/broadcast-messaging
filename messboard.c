@@ -14,8 +14,22 @@ struct Message{
 	int len;
 };
 
+struct Follow{
+	char* data;
+	struct Follow *next;	
+};
+
+struct HashObj{
+	int pid;
+	char word[256];
+};
+
+struct Follow* followList;
+struct HashObj* shrdHash;
+
 void error(const char*);
-void dostuff (int,char*,sem_t*);
+void dostuff (int,char*,sem_t*,struct HashObj*);
+int hash(char*);
 
 int main(int argc, char *argv[]){
 
@@ -26,6 +40,7 @@ int main(int argc, char *argv[]){
 	char *shrdmem;
 	int wrtIndx = 0;
 	sem_t *semaphore;
+	followList = NULL;
 
 	if(argc != 4){
 		printf("Invalid number of argument!\n");
@@ -71,6 +86,13 @@ int main(int argc, char *argv[]){
 	ftruncate(fd, sizeof(int) + (maxnmess * sizeof(struct Message)));
 	memcpy(shrdmem, &wrtIndx, sizeof(int));
 
+	//Create shared memory for hashtable
+	shrdHash = (struct HashObj *)mmap(NULL, 10000 * sizeof(struct HashObj), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+	int i; 
+	for(i=0;i<10000;i++){
+		shrdHash[0].pid = 0;
+	}
+
 	while (1) {
 		newsockfd = accept(sockfd, (struct sockaddr *) &cli_addr, &clilen);
 	        if (newsockfd < 0){ 
@@ -82,7 +104,7 @@ int main(int argc, char *argv[]){
 		}
 		if (pid == 0)  { // child process
 			close(sockfd);
-			dostuff(newsockfd,shrdmem,semaphore);
+			dostuff(newsockfd,shrdmem,semaphore,shrdHash);
 			exit(0);
 		}else{ // parent process
 			close(newsockfd);
@@ -97,8 +119,26 @@ void error(const char *msg){
 	    exit(1);
 }
 
-void dostuff (int sock, char* shrdmem, sem_t* semaphore)
-{
+int hash(char *str){
+	unsigned long hash = 5381;
+	int c;
+	while (c = *str++)
+		hash = ((hash << 5) + hash) + c; /* hash * 33 + c */
+
+	return abs(hash) % 10000;
+}
+
+char** parseInWord(char *str){
+	char * pch;	
+	pch = strtok (str," ,.-");
+	while (pch != NULL){
+		printf ("%s\n",pch);
+		pch = strtok (NULL, " ,.-");
+	}
+	return 0;
+}
+
+void dostuff (int sock, char* shrdmem, sem_t* semaphore, struct HashObj *shrdHash){
 	int n;
 	char buffer[256];
 	char *command,*message;
@@ -131,7 +171,7 @@ void dostuff (int sock, char* shrdmem, sem_t* semaphore)
 
 		
 		if(strcmp(command,"SEND") == 0){
-			int wrtIndx = 0;
+			int wrtIndx = 0,i=0;
 			struct Message tmpMes;
 
 			if(msgSize == 0){
@@ -152,6 +192,30 @@ void dostuff (int sock, char* shrdmem, sem_t* semaphore)
 			memcpy(shrdmem, &wrtIndx, sizeof(int));
 			sem_post(semaphore);
 			// Atomic op end
+
+			int procLst[32768];
+			for(i=0;i<32768;i++)
+				procLst[i] = 0;
+							
+			char* pch;	
+			pch = strtok (message," ,.-");
+			while (pch != NULL){
+				printf ("%s\n",pch);
+				int indx = hash(pch);
+				for(i=indx;shrdHash[i].pid != 0;i++){
+					if(strcmp(shrdHash[i].word,pch) == 0){
+						procLst[shrdHash[i].pid] = 1;
+					}
+					if(i==9999)
+						i=-1;
+				}
+				pch = strtok (NULL, " ,.-");
+			}
+			for(i=0;i<32768;i++){
+				if(procLst[i] == 1)
+					printf("%d\n",i);
+			}
+
 			int n = write(sock,"<ok>",4);
 			if(n<0){
 				error("Error writing to socket");
@@ -187,7 +251,76 @@ void dostuff (int sock, char* shrdmem, sem_t* semaphore)
 			}
 			free(result);	
 			free(msgLst);
-		}else if(strcmp(command,"BYE") == 0){
+		}else if(strcmp(command,"FOLLOW") == 0){
+			struct Follow *current = followList;
+			if(current == NULL){
+				current = malloc(sizeof(struct Follow));
+				current->data = malloc(msgSize);
+				strcpy(current->data,message);
+				current->next = NULL;
+				followList = current;
+			}else{
+				while(current->next != NULL){
+					current = current->next;
+				}
+				current->next = malloc(sizeof(struct Follow));
+				current->next->data = malloc(msgSize);
+				strcpy(current->next->data,message);
+				current->next->next = NULL;
+			}
+			
+			int indx = hash(message);
+			int i;
+			for(i=indx;shrdHash[i].pid != 0 && shrdHash[i].pid != -1;i++){
+				if(i == 9999)
+					i=-1;
+			}
+			shrdHash[i].pid = getpid();
+		       	strcpy(shrdHash[i].word,message);
+	
+			int n = write(sock,"<ok>",4);
+			if(n<0){
+				error("Error writing to socket");
+			}
+		}else if(strcmp(command,"FOLLOWING") == 0){
+			struct Follow *current = followList;
+			int wordsLen = 0;
+			char *result;
+			while(current != NULL){
+				wordsLen += strlen(current->data) + 1;
+				current = current->next;
+			}
+			result = malloc(wordsLen+1);
+			current = followList;
+			while(current != NULL){
+				strcat(result,current->data);
+				strcat(result," ");
+				current = current->next;
+			}
+			int n = write(sock,result,wordsLen);
+			if(n<0){
+				error("Error writing to socket");
+			}
+			free(result);
+		}else if(strcmp(command,"UNFOLLOW") == 0){
+			struct Follow *current = followList;
+			struct Follow *prev = NULL;
+			while(current != NULL && strcmp(message,current->data) != 0){
+				prev = current;
+				current = current->next;
+			}
+			if(prev == NULL){
+				followList = current->next;	
+			}else{
+				prev->next = current->next;
+			}
+			free(current);
+			int n = write(sock,"<ok>",4);
+			if(n<0){
+				error("Error writing to socket");	
+			}	
+		}
+		else if(strcmp(command,"BYE") == 0){
 			int n = write(sock,"<ok>",4);
 			if(n<0){
 				error("Error writing to socket");	
