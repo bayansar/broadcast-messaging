@@ -8,6 +8,7 @@
 #include <sys/fcntl.h>
 #include <sys/mman.h>
 #include <semaphore.h>
+#include <signal.h>
 
 struct Message{
 	char data[256];
@@ -26,15 +27,17 @@ struct HashObj{
 
 struct Follow* followList;
 struct HashObj* shrdHash;
+int newsockfd;
 
 void error(const char*);
 void dostuff (int,char*,sem_t*,struct HashObj*);
 int hash(char*);
+void notify(int);
 
 int main(int argc, char *argv[]){
 
 	int maxnmess, maxtotmesslen, portNumber;
-	int sockfd, newsockfd, pid,fd;
+	int sockfd, pid,fd;
 	socklen_t clilen;
 	struct sockaddr_in serv_addr, cli_addr;
 	char *shrdmem;
@@ -72,6 +75,12 @@ int main(int argc, char *argv[]){
 	listen(sockfd,5);
 	clilen = sizeof(cli_addr);
 
+	//Set signal handler
+	if (signal(SIGUSR1, notify) == SIG_ERR) {
+		printf("SIGINT install error\n");
+		exit(1);
+	}
+
 	// Create semaphore to use by writing message to shared memory	
 	semaphore = mmap(NULL, sizeof(sem_t), PROT_READ | PROT_WRITE,MAP_SHARED | MAP_ANONYMOUS, -1, 0);
 	sem_init(semaphore,1,1);
@@ -87,7 +96,7 @@ int main(int argc, char *argv[]){
 	memcpy(shrdmem, &wrtIndx, sizeof(int));
 
 	//Create shared memory for hashtable
-	shrdHash = (struct HashObj *)mmap(NULL, 10000 * sizeof(struct HashObj), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+	shrdHash = (struct HashObj *)mmap(NULL, 100000 * sizeof(struct HashObj), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
 	int i; 
 	for(i=0;i<10000;i++){
 		shrdHash[0].pid = 0;
@@ -114,18 +123,27 @@ int main(int argc, char *argv[]){
 	return 0;
 }
 
+void notify(int sno){
+	if(sno == 30){
+		int n = write(newsockfd,"NOTIF\n",6);
+		if(n<0){
+			error("Error writing to socket");
+		}
+	}
+}
+
 void error(const char *msg){
 	    perror(msg);
 	    exit(1);
 }
 
 int hash(char *str){
-	unsigned long hash = 5381;
+	unsigned long hash = 53812;
 	int c;
 	while (c = *str++)
 		hash = ((hash << 5) + hash) + c; /* hash * 33 + c */
 
-	return abs(hash) % 10000;
+	return abs(hash) % 100000;
 }
 
 char** parseInWord(char *str){
@@ -202,18 +220,20 @@ void dostuff (int sock, char* shrdmem, sem_t* semaphore, struct HashObj *shrdHas
 			while (pch != NULL){
 				printf ("%s\n",pch);
 				int indx = hash(pch);
-				for(i=indx;shrdHash[i].pid != 0;i++){
-					if(strcmp(shrdHash[i].word,pch) == 0){
+				int cnt = 0;
+				for(i=indx;shrdHash[i].pid != 0 && cnt != 100000;i++){
+					if(shrdHash[i].pid != -1 && strcmp(shrdHash[i].word,pch) == 0){
 						procLst[shrdHash[i].pid] = 1;
 					}
-					if(i==9999)
+					if(i==99999)
 						i=-1;
+					cnt++;
 				}
 				pch = strtok (NULL, " ,.-");
 			}
 			for(i=0;i<32768;i++){
 				if(procLst[i] == 1)
-					printf("%d\n",i);
+					kill (i, SIGUSR1);
 			}
 
 			int n = write(sock,"<ok>",4);
@@ -270,15 +290,20 @@ void dostuff (int sock, char* shrdmem, sem_t* semaphore, struct HashObj *shrdHas
 			}
 			
 			int indx = hash(message);
-			int i;
-			for(i=indx;shrdHash[i].pid != 0 && shrdHash[i].pid != -1;i++){
-				if(i == 9999)
+			int i,cnt=0;
+			for(i=indx;shrdHash[i].pid != 0 && shrdHash[i].pid != -1 && cnt != 100000;i++){
+				cnt++;
+				if(i == 99999)
 					i=-1;
 			}
-			shrdHash[i].pid = getpid();
-		       	strcpy(shrdHash[i].word,message);
-	
-			int n = write(sock,"<ok>",4);
+			int n;
+			if(cnt != 100000){
+				shrdHash[i].pid = getpid();
+			       	strcpy(shrdHash[i].word,message);
+				n = write(sock,"<ok>\n",5);
+			}else{
+				n = write(sock,"Follow limit exceed!\n",21);
+			}
 			if(n<0){
 				error("Error writing to socket");
 			}
@@ -315,6 +340,18 @@ void dostuff (int sock, char* shrdmem, sem_t* semaphore, struct HashObj *shrdHas
 				prev->next = current->next;
 			}
 			free(current);
+			int pid = getpid();
+			int indx = hash(message);
+			int i,cnt;
+			for(i=indx,cnt=0;cnt<100000 && shrdHash[i].pid != 0;i++){
+				if(shrdHash[i].pid == pid && strcmp(shrdHash[i].word,message) == 0){
+					shrdHash[i].pid = -1;
+					break;	
+				}
+				if(i==99999)
+					i=-1;
+			}	
+
 			int n = write(sock,"<ok>",4);
 			if(n<0){
 				error("Error writing to socket");	
