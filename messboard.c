@@ -30,22 +30,26 @@ struct HashObj{
 struct Follow* followList;
 struct HashObj* shrdHash;
 int newsockfd;
+int *overflow;
 sem_t *semaphore;
 char *shrdmem;
+char delimeter[] = " \t\r\n\v\f\\,.-:;'?!";
+int maxnmess;
 
 //Function definitions
 void error(const char*);
-void dostuff (int,char*,sem_t*,struct HashObj*);
+void dostuff (int,char*,sem_t*,struct HashObj*,int);
 int hash(char*);
 void notify(int);
 void *prntNtfWrds(void*);
 int isFollowed(char*);
 int findNmbrOfNtfiedWrds(char*);	
+void strToLower(char*);
 
 
 int main(int argc, char *argv[]){
 
-	int maxnmess, maxtotmesslen, portNumber;
+	int maxtotmesslen, portNumber;
 	int sockfd, pid,fd;
 	socklen_t clilen;
 	struct sockaddr_in serv_addr, cli_addr;
@@ -93,14 +97,17 @@ int main(int argc, char *argv[]){
 	sem_init(semaphore,1,1);
 
 	// Create shared memory with mmap
-	fd = open("data.bin", O_CREAT | O_RDWR, 0666);
-	shrdmem = mmap(0, sizeof(int) + (maxnmess * sizeof(struct Message)), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+	shrdmem = mmap(NULL, sizeof(int) + (maxnmess * sizeof(struct Message)), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
 	if(shrdmem == MAP_FAILED){
 		close(fd);
 		error("ERROR on on mmapping the file");
 	}
 	ftruncate(fd, sizeof(int) + (maxnmess * sizeof(struct Message)));
 	memcpy(shrdmem, &wrtIndx, sizeof(int));
+
+	//Create overflow flag
+	overflow = (int *)mmap(NULL, sizeof(int), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+	*overflow = 0;
 
 	//Create shared memory for hashtable
 	shrdHash = (struct HashObj *)mmap(NULL, 100000 * sizeof(struct HashObj), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
@@ -120,7 +127,7 @@ int main(int argc, char *argv[]){
 		}
 		if (pid == 0)  { // child process
 			close(sockfd);
-			dostuff(newsockfd,shrdmem,semaphore,shrdHash);
+			dostuff(newsockfd,shrdmem,semaphore,shrdHash,maxnmess);
 			exit(0);
 		}else{ // parent process
 			close(newsockfd);
@@ -139,23 +146,30 @@ void notify(int sno){
 
 int isFollowed(char * word){
 	struct Follow* current = followList;
+	char *cpword = malloc(strlen(word));
+	strcpy(cpword,word);
+	strToLower(cpword);
 	while(current != NULL){
-		if(strcmp(current->data,word) == 0){
+		char *cpcurrent = malloc(strlen(current->data));
+		strcpy(cpcurrent,current->data);
+		strToLower(cpcurrent);
+		if(strcmp(cpcurrent,cpword) == 0){
 			return 1;
 		}
 		current = current->next;
-	}	
+	}
+	free(cpword);	
 	return 0;
 }
 
 int findNmbrOfNtfiedWrds(char *msg){	
-	char *pch = strtok (msg," ,.-");
+	char *pch = strtok (msg,delimeter);
 	int cnt = 0;
 	while (pch != NULL){
 		if(isFollowed(pch)){
 			cnt++;
 		}
-		pch = strtok (NULL, " ,.-");
+		pch = strtok (NULL, delimeter);
 	}
 	return cnt;
 }
@@ -168,7 +182,11 @@ void *prntNtfWrds(void *vargp){
 	// ******** Atomic op start ******** //
 	sem_wait(semaphore);
 	memcpy(&wrtIndx, shrdmem, sizeof(int));
-	tailshrdMem = shrdmem + sizeof(int) + (sizeof(struct Message) * wrtIndx);
+	if((*overflow = 1) && (wrtIndx == 0)){
+		tailshrdMem = shrdmem + sizeof(int) + (sizeof(struct Message) * maxnmess);
+	}else{
+		tailshrdMem = shrdmem + sizeof(int) + (sizeof(struct Message) * wrtIndx);
+	}
 	memcpy(tmpMsg,tailshrdMem - (sizeof(struct Message) * 1), sizeof(struct Message));
 	lstMsg = (char *)malloc(sizeof(char) * tmpMsg->len);
 	strcpy(lstMsg,tmpMsg->data);
@@ -180,13 +198,13 @@ void *prntNtfWrds(void *vargp){
 	strcpy(msgcpy,tmpMsg->data);
 
 	int nmbrOfNtfiedWrds = findNmbrOfNtfiedWrds(msgcpy);
-	result = (char *)malloc(sizeof(char) * (tmpMsg->len + 3) * nmbrOfNtfiedWrds);
+	result = (char *)calloc(sizeof(char) * (tmpMsg->len + 3) * nmbrOfNtfiedWrds,sizeof(char));
 
-	char *pch = strtok (lstMsg," ,.-");
+	char *pch = strtok (lstMsg,delimeter);
 	while (pch != NULL){
 		if(isFollowed(pch)){
 			char *pos = strstr(tmpMsg->data,pch);
-			strncat(result,tmpMsg->data,pos-tmpMsg->data);
+			strncat(result,tmpMsg->data,pos-(tmpMsg->data));
 			strcat(result,"[");
 			strcat(result,pch);
 			strcat(result,"]");
@@ -194,7 +212,7 @@ void *prntNtfWrds(void *vargp){
 			strcat(result,"\n");
 			//result[tmpMsg->len + 2] = '\n';
 		}
-		pch = strtok (NULL, " ,.-");
+		pch = strtok (NULL, delimeter);
 	}
 	int n = write(newsockfd,result,strlen(result));
 	if(n<0){
@@ -220,7 +238,13 @@ int hash(char *str){
 	return abs(hash) % 100000;
 }
 
-void dostuff (int sock, char* shrdmem, sem_t* semaphore, struct HashObj *shrdHash){
+void strToLower(char *str){
+	for(int i = 0; str[i]; i++){
+		str[i] = tolower(str[i]);
+	}
+}
+
+void dostuff (int sock, char* shrdmem, sem_t* semaphore, struct HashObj *shrdHash,int maxnmess){
 	int n;
 	char buffer[256];
 	char *command,*message;
@@ -264,22 +288,28 @@ void dostuff (int sock, char* shrdmem, sem_t* semaphore, struct HashObj *shrdHas
 				continue;
 			}
 
+			// ******* Atomic op start ******* //
+			sem_wait(semaphore);
 			memcpy(&wrtIndx, shrdmem, sizeof(int));
 			strcpy(tmpMes.data,message);
 			tmpMes.len = msgSize;
-			// ******* Atomic op start ******* //
-			sem_wait(semaphore);
+
 			memcpy(shrdmem + sizeof(int) + sizeof(struct Message) * wrtIndx, &tmpMes, sizeof(struct Message));
 			wrtIndx++;
+			if(wrtIndx == maxnmess){
+				wrtIndx = 0;
+				*overflow = 1;
+			}
 			memcpy(shrdmem, &wrtIndx, sizeof(int));
 
 			int procLst[32768];
 			for(i=0;i<32768;i++)
 				procLst[i] = 0;
 							
-			char* pch;	
-			pch = strtok (message," ,.-");
+			char* pch;
+			pch = strtok (message,delimeter);
 			while (pch != NULL){
+				strToLower(pch);
 				int indx = hash(pch);
 				int cnt = 0;
 				for(i=indx;shrdHash[i].pid != 0 && cnt != 100000;i++){
@@ -290,7 +320,7 @@ void dostuff (int sock, char* shrdmem, sem_t* semaphore, struct HashObj *shrdHas
 						i=-1;
 					cnt++;
 				}
-				pch = strtok (NULL, " ,.-");
+				pch = strtok (NULL, delimeter);
 			}
 			for(i=0;i<32768;i++){
 				if(procLst[i] == 1)
@@ -305,35 +335,42 @@ void dostuff (int sock, char* shrdmem, sem_t* semaphore, struct HashObj *shrdHas
 			}
 		}else if(strcmp(command,"LAST") == 0){
 			int lstNmbr=0, wrtIndx=0,i=0,resultLen=0;
-			char *tailshrdMem,*result;
-		 	struct Message *msgLst;
+			char *result;
+			struct Message *tmpMsg;
+			char *currentIndx;
 
 			sscanf(message, "%d", &lstNmbr);
 			memcpy(&wrtIndx, shrdmem, sizeof(int));
-			if(lstNmbr > wrtIndx || msgSize == 0){
-				lstNmbr = wrtIndx;
+			if(*overflow == 0){
+				if((lstNmbr == 0) || (lstNmbr > wrtIndx)){
+					lstNmbr = wrtIndx;
+				}
+			}else{
+				if((lstNmbr == 0) || (lstNmbr > maxnmess)){
+					lstNmbr = maxnmess;
+				}
+			}
+
+			currentIndx = shrdmem + sizeof(int) + (sizeof(struct Message) * wrtIndx);
+			result = calloc(sizeof(char) * 257 * lstNmbr,sizeof(char));
+			for(i=0;i<lstNmbr;i++){
+				if(*overflow == 1 && currentIndx == shrdmem + sizeof(int)){
+					currentIndx = shrdmem + sizeof(int) + (sizeof(struct Message) * maxnmess);
+				}
+				tmpMsg = malloc(sizeof(struct Message));
+				memcpy(tmpMsg,currentIndx - sizeof(struct Message), sizeof(struct Message));
+				strcat(result,tmpMsg->data);
+				strcat(result,"\n");
+				resultLen += tmpMsg->len;
+				currentIndx = currentIndx - sizeof(struct Message);
 			}
 				
-			tailshrdMem = shrdmem + sizeof(int) + (sizeof(struct Message) * wrtIndx);
-			msgLst = malloc(sizeof(struct Message) * lstNmbr);
-			memcpy(msgLst,tailshrdMem - (sizeof(struct Message) * lstNmbr), sizeof(struct Message) * lstNmbr);
-			for(i=0;i<lstNmbr;i++){
-				resultLen += msgLst[i].len;
-			}
-			char c = '\n';
-			result = (char *)malloc(resultLen + (lstNmbr - 1));
-			for(i=lstNmbr-1;i>=0;i--){
-				if(i!=lstNmbr-1){
-					strncat(result,&c,1);
-				}
-				strncat(result,msgLst[i].data,msgLst[i].len);
-			}
-			int n = write(sock,result,resultLen+(lstNmbr-1));
+			int n = write(sock,result,resultLen+lstNmbr);
 			if(n<0){
 				error("Error writing to socket");
 			}
 			free(result);	
-			free(msgLst);
+			free(tmpMsg);
 		}else if(strcmp(command,"FOLLOW") == 0){
 			struct Follow *current = followList;
 			int alreadyExst = 0;
@@ -367,7 +404,9 @@ void dostuff (int sock, char* shrdmem, sem_t* semaphore, struct HashObj *shrdHas
 					strcpy(current->next->data,message);
 					current->next->next = NULL;
 				}
-				
+			
+					
+				strToLower(message);
 				int indx = hash(message);
 				int i,cnt=0;
 				for(i=indx;shrdHash[i].pid != 0 && shrdHash[i].pid != -1 && cnt != 100000;i++){
@@ -421,6 +460,7 @@ void dostuff (int sock, char* shrdmem, sem_t* semaphore, struct HashObj *shrdHas
 			}
 			free(current);
 			int pid = getpid();
+			strToLower(message);
 			int indx = hash(message);
 			int i,cnt;
 			for(i=indx,cnt=0;cnt<100000 && shrdHash[i].pid != 0;i++){
@@ -441,6 +481,7 @@ void dostuff (int sock, char* shrdmem, sem_t* semaphore, struct HashObj *shrdHas
 			struct Follow *current = followList;
 			while(current != NULL){	
 				int pid = getpid();
+				strToLower(current->data);
 				int indx = hash(current->data);
 				int i,cnt;
 				for(i=indx,cnt=0;cnt<100000 && shrdHash[i].pid != 0;i++){
