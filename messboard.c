@@ -352,8 +352,7 @@ void dostuff (int sock, char* shrdmem, sem_t* semaphore, struct HashObj *shrdHas
 				if(procLst[i] == 1)
 					kill (i, SIGUSR1);
 			}
-			
-			sleep(10);
+
 			int n = write(sock,"<ok>\n",5);
 			sem_post(semaphore);
 			// ******** Atomic op end ******** //
@@ -393,7 +392,6 @@ void dostuff (int sock, char* shrdmem, sem_t* semaphore, struct HashObj *shrdHas
 				resultLen += tmpMsg->len;
 				currentIndx = currentIndx - sizeof(struct Message);
 			}
-			sleep(10);
 			sem_post(semaphore);
 			// ******** Atomic op end ******** //
 				
