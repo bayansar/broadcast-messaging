@@ -9,6 +9,8 @@
 #include <sys/mman.h>
 #include <semaphore.h>
 #include <signal.h>
+#include <sys/types.h>
+#include <sys/un.h>
 
 
 struct Message{
@@ -49,12 +51,16 @@ void strToLower(char*);
 
 int main(int argc, char *argv[]){
 
-	int maxtotmesslen, portNumber;
-	int sockfd, pid,fd;
+	int maxtotmesslen, portNumber=0;
+	int sockfd, pid,fd,len,plen;
 	socklen_t clilen;
 	struct sockaddr_in serv_addr, cli_addr;
+	struct sockaddr_un saun;
+	struct sockaddr_un paun;
+	char unx_address[50];
 	int wrtIndx = 0;
 	followList = NULL;
+	int isUnxSckt = 0;
 
 	if(argc != 4){
 		printf("Invalid number of argument!\n");
@@ -64,24 +70,41 @@ int main(int argc, char *argv[]){
 	sscanf(argv[1], "%d", &maxnmess);
 	sscanf(argv[2], "%d", &maxtotmesslen);
 	sscanf(argv[3], "%d", &portNumber);
-
+	
 	if(portNumber == 0){
-		printf("Invalid port number!");
-		exit(1);
+		printf("Unix Domain Socket\n");
+		isUnxSckt = 1;
+		sscanf(argv[3],"%s",unx_address);
+		if ((sockfd = socket(AF_UNIX, SOCK_STREAM, 0)) < 0) {
+			    perror("server: socket");
+			    exit(1);
+		}
+
+		saun.sun_family = AF_UNIX;
+		strcpy(saun.sun_path, unx_address);
+
+		plen = len = sizeof(struct sockaddr_un);
+
+		if (bind(sockfd, (struct sockaddr *)&saun, len) < 0) {
+			perror("server: bind");
+			exit(1);
+		}
+	}else{
+		printf("TCP Socket \n");
+		sockfd = socket(AF_INET, SOCK_STREAM, 0);
+		if(sockfd < 0){
+			error("ERROR opening socket");
+		}
+
+		bzero((char *) &serv_addr, sizeof(serv_addr));
+		serv_addr.sin_family = AF_INET;
+		serv_addr.sin_addr.s_addr = INADDR_ANY;
+		serv_addr.sin_port = htons(portNumber);
+		if (bind(sockfd, (struct sockaddr *) &serv_addr, sizeof(serv_addr)) < 0){
+			error("ERROR on binding");
+		}
 	}
 
-	sockfd = socket(AF_INET, SOCK_STREAM, 0);
-	if(sockfd < 0){
-		error("ERROR opening socket");
-	}
-
-	bzero((char *) &serv_addr, sizeof(serv_addr));
-	serv_addr.sin_family = AF_INET;
-	serv_addr.sin_addr.s_addr = INADDR_ANY;
-	serv_addr.sin_port = htons(portNumber);
-	if (bind(sockfd, (struct sockaddr *) &serv_addr, sizeof(serv_addr)) < 0){
-		error("ERROR on binding");
-	}
 
 	listen(sockfd,5);
 	clilen = sizeof(cli_addr);
@@ -102,7 +125,6 @@ int main(int argc, char *argv[]){
 		close(fd);
 		error("ERROR on on mmapping the file");
 	}
-	ftruncate(fd, sizeof(int) + (maxnmess * sizeof(struct Message)));
 	memcpy(shrdmem, &wrtIndx, sizeof(int));
 
 	//Create overflow flag
@@ -117,7 +139,11 @@ int main(int argc, char *argv[]){
 	}
 
 	while (1) {
-		newsockfd = accept(sockfd, (struct sockaddr *) &cli_addr, &clilen);
+		if(!isUnxSckt){
+			newsockfd = accept(sockfd, (struct sockaddr *) &cli_addr, &clilen);
+		}else{
+			newsockfd = accept(sockfd, (struct sockaddr *) &paun, &plen);
+		}
 	        if (newsockfd < 0){ 
 			error("ERROR on accept");
 		}
@@ -326,7 +352,8 @@ void dostuff (int sock, char* shrdmem, sem_t* semaphore, struct HashObj *shrdHas
 				if(procLst[i] == 1)
 					kill (i, SIGUSR1);
 			}
-
+			
+			sleep(10);
 			int n = write(sock,"<ok>\n",5);
 			sem_post(semaphore);
 			// ******** Atomic op end ******** //
@@ -340,6 +367,8 @@ void dostuff (int sock, char* shrdmem, sem_t* semaphore, struct HashObj *shrdHas
 			char *currentIndx;
 
 			sscanf(message, "%d", &lstNmbr);
+			// ******* Atomic op start ******* //
+			sem_wait(semaphore);
 			memcpy(&wrtIndx, shrdmem, sizeof(int));
 			if(*overflow == 0){
 				if((lstNmbr == 0) || (lstNmbr > wrtIndx)){
@@ -364,6 +393,9 @@ void dostuff (int sock, char* shrdmem, sem_t* semaphore, struct HashObj *shrdHas
 				resultLen += tmpMsg->len;
 				currentIndx = currentIndx - sizeof(struct Message);
 			}
+			sleep(10);
+			sem_post(semaphore);
+			// ******** Atomic op end ******** //
 				
 			int n = write(sock,result,resultLen+lstNmbr);
 			if(n<0){
