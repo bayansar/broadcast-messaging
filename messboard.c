@@ -229,7 +229,24 @@ void *prntNtfWrds(void *vargp){
 	char *pch = strtok (lstMsg,delimeter);
 	while (pch != NULL){
 		if(isFollowed(pch)){
-			char *pos = strstr(tmpMsg->data,pch);
+			char *pos;
+			int i=0,j=0,find=0;
+			while(1){	
+				pos = strstr(tmpMsg->data + (j * strlen(pch)),pch);
+				for(i=0;i<15;i++){
+					if(
+						(*(pos + strlen(pch)) == delimeter[i]) ||
+						(*(pos+strlen(pch)) == '\n') || 
+						(*(pos+strlen(pch)) == '\0')
+					){
+						find = 1;
+						break;
+					}
+				}
+				j++;
+				if(find)
+					break;
+			}
 			strncat(result,tmpMsg->data,pos-(tmpMsg->data));
 			strcat(result,"[");
 			strcat(result,pch);
